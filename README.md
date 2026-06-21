@@ -4,6 +4,20 @@ A fast autocomplete search engine powered by Wikipedia pageview data.
 Suggestions are served from an in-memory **Trie** built from the most popular
 English Wikipedia page titles.
 
+## Demo
+
+Watch the engine in action with the new Retro Sunset UI:
+
+![Type-Ahead Demo Video](docs/media/demo.webp)
+
+### Screenshots
+
+<p align="center">
+  <img src="docs/media/initial.png" alt="Initial State" width="48%">
+  &nbsp;
+  <img src="docs/media/suggestions.png" alt="Suggestions Dropdown" width="48%">
+</p>
+
 ## Project Structure
 
 ```
