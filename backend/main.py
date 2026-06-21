@@ -14,6 +14,7 @@ import asyncio
 import csv
 import os
 import time
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -67,6 +68,8 @@ MAX_BUFFER_SIZE = 50
 search_buffer: list[tuple[str, float]] = []
 total_search_events: int = 0
 total_store_writes: int = 0
+total_store_reads: int = 0
+suggest_latencies: deque = deque(maxlen=500)
 
 def flush_buffer() -> None:
     """Flush buffered search events into the trie and cache synchronously."""
@@ -206,27 +209,35 @@ async def suggest(
     Uses cache-aside: check the consistent-hash-ring cache first, compute
     from the trie on a miss, and store the result with a 60-second TTL.
     """
-    if mode not in ("basic", "trending"):
-        mode = "trending"
+    start_time = time.perf_counter()
+    try:
+        if mode not in ("basic", "trending"):
+            mode = "trending"
 
-    prefix = q.strip().lower()
-    if not prefix:
-        return SuggestResponse(suggestions=[])
+        prefix = q.strip().lower()
+        if not prefix:
+            return SuggestResponse(suggestions=[])
 
-    cache_key = f"{mode}:{prefix}"
+        cache_key = f"{mode}:{prefix}"
 
-    # --- Cache lookup ---
-    cached = suggest_cache.get(cache_key)
-    if cached is not None:
-        return SuggestResponse(suggestions=[Suggestion(**r) for r in cached])
+        # --- Cache lookup ---
+        cached = suggest_cache.get(cache_key)
+        if cached is not None:
+            return SuggestResponse(suggestions=[Suggestion(**r) for r in cached])
 
-    # --- Cache miss: compute from trie ---
-    results = trie.search(prefix, top_k=10, mode=mode)
-    suggest_cache.put(cache_key, results)
+        # --- Cache miss: compute from trie ---
+        global total_store_reads
+        total_store_reads += 1
+        
+        results = trie.search(prefix, top_k=10, mode=mode)
+        suggest_cache.put(cache_key, results)
 
-    return SuggestResponse(
-        suggestions=[Suggestion(**r) for r in results],
-    )
+        return SuggestResponse(
+            suggestions=[Suggestion(**r) for r in results],
+        )
+    finally:
+        duration_ms = (time.perf_counter() - start_time) * 1000.0
+        suggest_latencies.append(duration_ms)
 
 
 @app.get("/trending", response_model=SuggestResponse)
@@ -281,6 +292,39 @@ async def batch_stats() -> BatchStatsResponse:
         current_buffer_size=len(search_buffer),
     )
 
+
+class PerfStatsResponse(BaseModel):
+    p50_latency_ms: float
+    p95_latency_ms: float
+    p99_latency_ms: float
+    cache_hit_rate_percent: float
+    total_store_reads: int
+    total_store_writes: int
+
+@app.get("/admin/perf-stats", response_model=PerfStatsResponse)
+async def perf_stats() -> PerfStatsResponse:
+    """Return performance statistics and latency percentiles."""
+    lats = sorted(list(suggest_latencies))
+    n = len(lats)
+    
+    if n > 0:
+        p50 = lats[int(n * 0.5)]
+        p95 = lats[int(n * 0.95)]
+        p99 = lats[int(n * 0.99)]
+    else:
+        p50 = p95 = p99 = 0.0
+
+    total_requests = suggest_cache.hits + suggest_cache.misses
+    hit_rate = (suggest_cache.hits / total_requests * 100.0) if total_requests > 0 else 0.0
+
+    return PerfStatsResponse(
+        p50_latency_ms=p50,
+        p95_latency_ms=p95,
+        p99_latency_ms=p99,
+        cache_hit_rate_percent=hit_rate,
+        total_store_reads=total_store_reads,
+        total_store_writes=total_store_writes,
+    )
 
 @app.get("/cache/debug", response_model=CacheDebugResponse)
 async def cache_debug(
