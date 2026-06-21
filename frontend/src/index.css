@@ -4,24 +4,24 @@
 
 :root {
   /* Surfaces */
-  --color-bg: #0f1117;
-  --color-surface: #1a1d27;
-  --color-border: #2a2d3a;
-  --color-highlight: rgba(99, 102, 241, 0.08);
+  --color-bg: #1E1511; /* Dark warm brown */
+  --color-surface: #2E211A; /* Slightly lighter brown */
+  --color-border: #BE5103; /* Rust orange */
+  --color-highlight: rgba(255, 206, 27, 0.15); /* Yellow highlight */
 
   /* Text */
-  --color-text: #e8eaed;
-  --color-text-muted: #8b8fa3;
-  --color-text-secondary: #a1a5b7;
+  --color-text: #FFF2E8; /* Warm off-white text */
+  --color-text-muted: #FFCE1B; /* Yellow for muted text */
+  --color-text-secondary: #B7410E; /* Dark rust for secondary text */
 
   /* Accent */
-  --color-accent: #6366f1;
-  --color-accent-glow: rgba(99, 102, 241, 0.18);
-  --color-accent-soft: rgba(99, 102, 241, 0.12);
+  --color-accent: #069494; /* Teal */
+  --color-accent-glow: rgba(6, 148, 148, 0.25);
+  --color-accent-soft: rgba(6, 148, 148, 0.15);
 
   /* Utility */
-  --color-error: #f87171;
-  --color-count-bg: rgba(99, 102, 241, 0.1);
+  --color-error: #B7410E;
+  --color-count-bg: rgba(255, 206, 27, 0.2);
 
   /* Typography */
   --font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont,
