@@ -21,59 +21,58 @@ English Wikipedia page titles.
 
 ## Quick Start
 
-### 1. Build the dataset
+### 1. Build the Dataset
+
+The application is powered by a CSV dataset. We provide a script to download real Wikipedia pageview dumps and compile them into `queries.csv`.
 
 ```bash
 cd data
-python build_dataset.py          # downloads ~3 hourly dumps
-python build_dataset.py --hours 5  # or more if you need 100k+ rows
+python build_dataset.py          # downloads default ~3 hourly dumps
+# or specify the number of hours to fetch:
+python build_dataset.py --hours 5  
 ```
 
 This creates `data/queries.csv` with columns `query` and `count`.
 
-### 2. Install backend dependencies
+### 2. Run the Backend
+
+The backend is a Python FastAPI server running an in-memory Trie and caching layer.
 
 ```bash
 cd backend
 pip install -r requirements.txt
-```
-
-### 3. Run the API server
-
-```bash
-cd backend
 python -m uvicorn main:app --reload --port 8000
 ```
 
-### 4. Try a suggestion
+### 3. Run the Frontend
 
-```
-GET http://localhost:8000/suggest?q=pyth
-```
+The frontend is a React application built with Vite that connects to the backend. Open a new terminal window:
 
-```json
-{
-  "suggestions": [
-    { "query": "python (programming language)", "count": 4231 },
-    { "query": "python", "count": 3892 }
-  ]
-}
+```bash
+cd frontend
+npm install
+npm run dev
 ```
 
-## Background Search Batching
-
-To improve throughput under high load, `POST /search` events are queued in an in-memory buffer rather than immediately written to the backing store. A background task periodically groups these buffered events by query, calculates aggregated increments, and flushes them to the Trie and persistent CSV store every 5 seconds or whenever the buffer reaches 50 items. 
-
-**Trade-off Notice**: Because events are buffered in memory, there is a risk of data loss. If the backend process crashes or is forcefully terminated, any unflushed search events (up to 5 seconds or 50 queries worth) will be lost permanently. This prioritizes performance and scaling at the cost of strict durability guarantees.
+The app will be available at `http://localhost:5173/`.
 
 ## Running Tests
+
+To run the backend test suite:
 
 ```bash
 cd backend
 pytest test_api.py -v
 ```
 
+## Documentation
+
+- [Architecture Guide](docs/architecture.md): Details on the read/write paths, consistent hash ring, and recency scoring logic.
+- [API Reference](docs/api.md): Endpoints, parameters, and example requests/responses.
+- [Demo Checklist](docs/demo_checklist.md): A step-by-step guide to demonstrating the features.
+
 ## Requirements
 
 - Python 3.10+
+- Node.js & npm (for the frontend)
 - Internet connection (for dataset download)
