@@ -145,3 +145,94 @@ class TestSuggestEndpoint:
         for s in resp.json()["suggestions"]:
             assert isinstance(s["query"], str)
             assert isinstance(s["count"], int)
+
+
+# ---------------------------------------------------------------------------
+# POST /search tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def search_client(tmp_path) -> TestClient:
+    """Create an isolated TestClient for /search tests so trie mutations
+    don't leak into the /suggest test class."""
+    import main
+
+    csv_file = tmp_path / "queries.csv"
+    with open(csv_file, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["query", "count"])
+        for query, count in SAMPLE_DATA:
+            writer.writerow([query, count])
+
+    main.trie = Trie()
+    main.load_trie(csv_file)
+
+    # Monkey-patch _data_csv_path so persist_csv writes to our temp file
+    original = main._data_csv_path
+    main._data_csv_path = lambda: csv_file
+    client = TestClient(main.app)
+    yield client
+    main._data_csv_path = original
+
+
+class TestSearchEndpoint:
+    """Tests for POST /search."""
+
+    def test_search_increments_existing_query(self, search_client: TestClient) -> None:
+        """Searching an existing query should increment its count by 1."""
+        # Get original count
+        resp = search_client.get("/suggest", params={"q": "python programming"})
+        original_count = resp.json()["suggestions"][0]["count"]
+
+        # Submit search
+        resp = search_client.post("/search", json={"query": "python programming"})
+        assert resp.status_code == 200
+        assert resp.json()["message"] == "Searched"
+
+        # Verify count incremented
+        resp = search_client.get("/suggest", params={"q": "python programming"})
+        new_count = resp.json()["suggestions"][0]["count"]
+        assert new_count == original_count + 1
+
+    def test_search_inserts_new_query(self, search_client: TestClient) -> None:
+        """Searching a brand-new query should insert it with count = 1."""
+        resp = search_client.post("/search", json={"query": "quantum computing"})
+        assert resp.status_code == 200
+        assert resp.json()["message"] == "Searched"
+
+        # The new query should now appear in suggestions
+        resp = search_client.get("/suggest", params={"q": "quantum computing"})
+        suggestions = resp.json()["suggestions"]
+        assert len(suggestions) == 1
+        assert suggestions[0]["query"] == "quantum computing"
+        assert suggestions[0]["count"] == 1
+
+    def test_search_empty_query(self, search_client: TestClient) -> None:
+        """Empty or whitespace-only query should return Searched without error."""
+        resp = search_client.post("/search", json={"query": "   "})
+        assert resp.status_code == 200
+        assert resp.json()["message"] == "Searched"
+
+    def test_search_normalizes_case(self, search_client: TestClient) -> None:
+        """Search should normalize to lowercase, matching the trie."""
+        resp = search_client.post("/search", json={"query": "PYTHON Programming"})
+        assert resp.status_code == 200
+
+        resp = search_client.get("/suggest", params={"q": "python programming"})
+        found = resp.json()["suggestions"][0]
+        assert found["query"] == "python programming"
+        # Count should be original (5000) + 1
+        assert found["count"] == 5001
+
+    def test_search_updates_visible_in_suggest(self, search_client: TestClient) -> None:
+        """After searching, the next /suggest call should reflect the new count."""
+        # Search for "mars" twice
+        search_client.post("/search", json={"query": "mars"})
+        search_client.post("/search", json={"query": "mars"})
+
+        resp = search_client.get("/suggest", params={"q": "mars"})
+        mars = resp.json()["suggestions"][0]
+        assert mars["query"] == "mars"
+        # Original was 1500, +2 = 1502
+        assert mars["count"] == 1502

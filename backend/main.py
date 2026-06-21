@@ -3,6 +3,8 @@ Type-Ahead Search — FastAPI backend.
 
 On startup the server loads ``/data/queries.csv`` into a Trie.
 The ``GET /suggest`` endpoint returns the top-10 matches for a prefix.
+The ``POST /search`` endpoint records a search by incrementing the trie
+count and persisting the change back to ``queries.csv``.
 """
 
 from __future__ import annotations
@@ -30,6 +32,14 @@ class Suggestion(BaseModel):
 
 class SuggestResponse(BaseModel):
     suggestions: list[Suggestion]
+
+
+class SearchRequest(BaseModel):
+    query: str
+
+
+class SearchResponse(BaseModel):
+    message: str
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +76,37 @@ def load_trie(csv_path: Path | None = None) -> None:
     print(f"Loaded {loaded:,} queries into the trie.")
 
 
+def persist_csv(csv_path: Path | None = None) -> None:
+    """Rewrite *csv_path* from the current trie contents.
+
+    This is the simplest persistence strategy: a full CSV rewrite.
+    Adequate for the current synchronous, single-process setup.
+    """
+    if csv_path is None:
+        csv_path = _data_csv_path()
+
+    # Collect every terminal node
+    entries: list[tuple[str, int]] = []
+
+    def _walk(node) -> None:
+        if node.is_end and node.query is not None:
+            entries.append((node.query, node.count))
+        for child in node.children.values():
+            _walk(child)
+
+    _walk(trie.root)
+
+    # Sort by count desc for human readability
+    entries.sort(key=lambda e: -e[1])
+
+    with open(csv_path, "w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["query", "count"])
+        for query, count in entries:
+            writer.writerow([query, count])
+
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load data on startup; nothing special on shutdown."""
@@ -86,7 +127,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -107,3 +148,22 @@ async def suggest(q: str = Query(default="")) -> SuggestResponse:
     return SuggestResponse(
         suggestions=[Suggestion(**r) for r in results],
     )
+
+
+@app.post("/search", response_model=SearchResponse)
+async def search(body: SearchRequest) -> SearchResponse:
+    """Record a search: increment the query's count by 1 and persist.
+
+    - Normalizes the query the same way as ``/suggest``.
+    - If the query exists in the trie its count is incremented.
+    - If it doesn't exist it is inserted with count = 1.
+    - The updated trie is written back to ``queries.csv``.
+    """
+    normalized = body.query.strip().lower()
+    if not normalized:
+        return SearchResponse(message="Searched")
+
+    trie.upsert(normalized, delta=1)
+    persist_csv()
+
+    return SearchResponse(message="Searched")

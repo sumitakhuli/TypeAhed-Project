@@ -37,6 +37,21 @@ class Trie:
         node.query = query
         node.count = count
 
+    def upsert(self, query: str, delta: int = 1) -> int:
+        """Increment the count for *query* by *delta*, inserting if new.
+
+        Returns the updated count.
+        """
+        node = self.root
+        for char in query:
+            if char not in node.children:
+                node.children[char] = TrieNode()
+            node = node.children[char]
+        node.is_end = True
+        node.query = query
+        node.count += delta
+        return node.count
+
     def _find_node(self, prefix: str) -> TrieNode | None:
         """Walk the trie to the node matching the last character of *prefix*.
 
