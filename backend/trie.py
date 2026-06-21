@@ -7,7 +7,13 @@ Each node in the trie represents a single character. Terminal nodes
 
 from __future__ import annotations
 
+import math
+import time
 from dataclasses import dataclass, field
+
+# Decay rate for trending score.
+# Score = count * exp(-DECAY_RATE * hours_since_last_searched)
+DECAY_RATE = 0.01
 
 
 @dataclass
@@ -18,6 +24,7 @@ class TrieNode:
     is_end: bool = False
     query: str | None = None
     count: int = 0
+    last_searched_at: float = 0.0
 
 
 class Trie:
@@ -26,7 +33,7 @@ class Trie:
     def __init__(self) -> None:
         self.root = TrieNode()
 
-    def insert(self, query: str, count: int) -> None:
+    def insert(self, query: str, count: int, last_searched_at: float = 0.0) -> None:
         """Insert a query with its associated view count into the trie."""
         node = self.root
         for char in query:
@@ -36,6 +43,7 @@ class Trie:
         node.is_end = True
         node.query = query
         node.count = count
+        node.last_searched_at = last_searched_at
 
     def upsert(self, query: str, delta: int = 1) -> int:
         """Increment the count for *query* by *delta*, inserting if new.
@@ -50,6 +58,7 @@ class Trie:
         node.is_end = True
         node.query = query
         node.count += delta
+        node.last_searched_at = time.time()
         return node.count
 
     def _find_node(self, prefix: str) -> TrieNode | None:
@@ -64,30 +73,57 @@ class Trie:
             node = node.children[char]
         return node
 
-    def _collect(self, node: TrieNode, results: list[tuple[str, int]]) -> None:
-        """Recursively collect all terminal (query, count) pairs under *node*."""
+    def _collect(self, node: TrieNode, results: list[TrieNode]) -> None:
+        """Recursively collect all terminal nodes under *node*."""
         if node.is_end and node.query is not None:
-            results.append((node.query, node.count))
+            results.append(node)
         for child in node.children.values():
             self._collect(child, results)
 
-    def search(self, prefix: str, top_k: int = 10) -> list[dict[str, object]]:
+    def search(self, prefix: str, top_k: int = 10, mode: str = "trending") -> list[dict[str, object]]:
         """Return up to *top_k* suggestions for the given prefix.
 
-        Results are sorted by count descending.  Returns an empty list when
-        the prefix has no matches.
+        If mode is "basic", results are sorted by count descending.
+        If mode is "trending", results are sorted by recency-aware score.
+        Returns an empty list when the prefix has no matches.
         """
         node = self._find_node(prefix)
         if node is None:
             return []
 
-        results: list[tuple[str, int]] = []
+        results: list[TrieNode] = []
         self._collect(node, results)
 
-        # Sort by count descending, then alphabetically for determinism
-        results.sort(key=lambda item: (-item[1], item[0]))
+        now = time.time()
+
+        def _get_score(n: TrieNode) -> float:
+            if mode == "basic":
+                return float(n.count)
+            hours_since = max(0.0, (now - n.last_searched_at) / 3600.0)
+            return n.count * math.exp(-DECAY_RATE * hours_since)
+
+        # Sort by score descending, then alphabetically for determinism
+        results.sort(key=lambda n: (-_get_score(n), n.query))
 
         return [
-            {"query": query, "count": count}
-            for query, count in results[:top_k]
+            {"query": n.query, "count": n.count}
+            for n in results[:top_k]
+        ]
+
+    def get_trending(self, limit: int = 10) -> list[dict[str, object]]:
+        """Return top queries overall, sorted by recency-aware score."""
+        results: list[TrieNode] = []
+        self._collect(self.root, results)
+
+        now = time.time()
+
+        def _get_score(n: TrieNode) -> float:
+            hours_since = max(0.0, (now - n.last_searched_at) / 3600.0)
+            return n.count * math.exp(-DECAY_RATE * hours_since)
+
+        results.sort(key=lambda n: (-_get_score(n), n.query))
+
+        return [
+            {"query": n.query, "count": n.count}
+            for n in results[:limit]
         ]

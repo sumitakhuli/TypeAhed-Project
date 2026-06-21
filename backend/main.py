@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import csv
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -48,6 +49,7 @@ class CacheDebugResponse(BaseModel):
     prefix: str
     owner_node: str
     status: str  # "hit" | "miss"
+    mode: str
 
 
 # ---------------------------------------------------------------------------
@@ -74,12 +76,14 @@ def load_trie(csv_path: Path | None = None) -> None:
         return
 
     loaded = 0
+    now = time.time()
     with open(csv_path, encoding="utf-8", newline="") as fh:
         reader = csv.DictReader(fh)
         for row in reader:
             query = row["query"]
             count = int(row["count"])
-            trie.insert(query, count)
+            last_searched_at = float(row.get("last_searched_at", now))
+            trie.insert(query, count, last_searched_at)
             loaded += 1
 
     print(f"Loaded {loaded:,} queries into the trie.")
@@ -95,11 +99,11 @@ def persist_csv(csv_path: Path | None = None) -> None:
         csv_path = _data_csv_path()
 
     # Collect every terminal node
-    entries: list[tuple[str, int]] = []
+    entries: list[tuple[str, int, float]] = []
 
     def _walk(node) -> None:
         if node.is_end and node.query is not None:
-            entries.append((node.query, node.count))
+            entries.append((node.query, node.count, node.last_searched_at))
         for child in node.children.values():
             _walk(child)
 
@@ -110,9 +114,9 @@ def persist_csv(csv_path: Path | None = None) -> None:
 
     with open(csv_path, "w", encoding="utf-8", newline="") as fh:
         writer = csv.writer(fh)
-        writer.writerow(["query", "count"])
-        for query, count in entries:
-            writer.writerow([query, count])
+        writer.writerow(["query", "count", "last_searched_at"])
+        for query, count, last_searched_at in entries:
+            writer.writerow([query, count, last_searched_at])
 
 
 @asynccontextmanager
@@ -141,24 +145,49 @@ app.add_middleware(
 
 
 @app.get("/suggest", response_model=SuggestResponse)
-async def suggest(q: str = Query(default="")) -> SuggestResponse:
+async def suggest(
+    q: str = Query(default=""),
+    mode: str = Query(default="trending")
+) -> SuggestResponse:
     """Return up to 10 autocomplete suggestions for the given prefix *q*.
 
     Uses cache-aside: check the consistent-hash-ring cache first, compute
     from the trie on a miss, and store the result with a 60-second TTL.
     """
+    if mode not in ("basic", "trending"):
+        mode = "trending"
+
     prefix = q.strip().lower()
     if not prefix:
         return SuggestResponse(suggestions=[])
 
+    cache_key = f"{mode}:{prefix}"
+
     # --- Cache lookup ---
-    cached = suggest_cache.get(prefix)
+    cached = suggest_cache.get(cache_key)
     if cached is not None:
         return SuggestResponse(suggestions=[Suggestion(**r) for r in cached])
 
     # --- Cache miss: compute from trie ---
-    results = trie.search(prefix, top_k=10)
-    suggest_cache.put(prefix, results)
+    results = trie.search(prefix, top_k=10, mode=mode)
+    suggest_cache.put(cache_key, results)
+
+    return SuggestResponse(
+        suggestions=[Suggestion(**r) for r in results],
+    )
+
+
+@app.get("/trending", response_model=SuggestResponse)
+async def trending(limit: int = Query(default=10)) -> SuggestResponse:
+    """Return top N queries overall by recency-aware score."""
+    cache_key = f"global_trending:{limit}"
+
+    cached = suggest_cache.get(cache_key)
+    if cached is not None:
+        return SuggestResponse(suggestions=[Suggestion(**r) for r in cached])
+
+    results = trie.get_trending(limit=limit)
+    suggest_cache.put(cache_key, results)
 
     return SuggestResponse(
         suggestions=[Suggestion(**r) for r in results],
@@ -179,32 +208,43 @@ async def search(body: SearchRequest) -> SearchResponse:
     trie.upsert(normalized, delta=1)
     persist_csv()
 
-    # Invalidate every prefix of this query from the cache
+    # Invalidate every prefix of this query from the cache (both modes)
     suggest_cache.invalidate_all_prefixes(normalized)
+    # Also invalidate the global trending caches
+    suggest_cache.delete("global_trending:10")
 
     return SearchResponse(message="Searched")
 
 
 @app.get("/cache/debug", response_model=CacheDebugResponse)
-async def cache_debug(prefix: str = Query(default="")) -> CacheDebugResponse:
+async def cache_debug(
+    prefix: str = Query(default=""),
+    mode: str = Query(default="trending")
+) -> CacheDebugResponse:
     """Return cache state for a given prefix without computing a new value.
 
     Useful for debugging: shows which node owns the key and whether
     it's currently cached (hit) or not (miss).
     """
+    if mode not in ("basic", "trending"):
+        mode = "trending"
+
     normalized = prefix.strip().lower()
     if not normalized:
         return CacheDebugResponse(
             prefix="",
             owner_node="",
             status="miss",
+            mode=mode,
         )
 
-    owner = suggest_cache.owner_of(normalized)
-    is_cached = suggest_cache.contains(normalized)
+    cache_key = f"{mode}:{normalized}"
+    owner = suggest_cache.owner_of(cache_key)
+    is_cached = suggest_cache.contains(cache_key)
 
     return CacheDebugResponse(
         prefix=normalized,
         owner_node=owner,
         status="hit" if is_cached else "miss",
+        mode=mode,
     )

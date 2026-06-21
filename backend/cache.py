@@ -75,13 +75,12 @@ class SuggestCache:
 
     def invalidate_all_prefixes(self, query: str) -> None:
         """Delete every prefix of *query* (length 1 → full length) from the cache.
-
-        Each prefix may land on a different node — the ring is consulted
-        per-prefix.
+        Also invalidates both 'basic' and 'trending' cache keys.
         """
         for length in range(1, len(query) + 1):
             prefix = query[:length]
-            self.delete(prefix)
+            self.delete(f"basic:{prefix}")
+            self.delete(f"trending:{prefix}")
 
     def owner_of(self, key: str) -> str:
         """Return the node ID that owns *key* (for the debug endpoint)."""

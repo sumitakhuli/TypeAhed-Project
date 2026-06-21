@@ -1,0 +1,16 @@
+Trending vs Basic Ranking Demo
+=================================================================
+DECAY_RATE = 0.01
+
+Queries inserted:
+1. 'python programming'  - Count: 10000, Age: 10 days
+2. 'python snake'        - Count: 8000,  Age: 7 days
+3. 'python tutorial'     - Count: 5000,  Age: 2 days
+4. 'python 3.12 release' - Count: 1500,  Age: 0 days (Now)
+
+BASIC MODE (Raw Count)         | TRENDING MODE (Recency Score) 
+-----------------------------------------------------------------
+python programming (10000)     | python tutorial (5000)        
+python snake (8000)            | python 3.12 release (1500)    
+python tutorial (5000)         | python snake (8000)           
+python 3.12 release (1500)     | python programming (10000)    

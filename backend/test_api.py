@@ -273,13 +273,13 @@ class TestCacheLayer:
         original = resp.json()["suggestions"][0]["count"]
 
         # The prefix should now be cached
-        assert main.suggest_cache.contains("mars")
+        assert main.suggest_cache.contains("trending:mars")
 
         # Search (should invalidate)
         search_client.post("/search", json={"query": "mars"})
 
         # Cache should be invalidated
-        assert not main.suggest_cache.contains("mars")
+        assert not main.suggest_cache.contains("trending:mars")
 
         # Next suggest call should return updated count
         resp = search_client.get("/suggest", params={"q": "mars"})
@@ -292,13 +292,13 @@ class TestCacheLayer:
         # Warm cache for multiple prefixes
         for prefix in ["j", "ja", "jav", "java"]:
             search_client.get("/suggest", params={"q": prefix})
-            assert main.suggest_cache.contains(prefix)
+            assert main.suggest_cache.contains(f"trending:{prefix}")
 
         # Search for "java" should invalidate all its prefixes
         search_client.post("/search", json={"query": "java"})
 
         for prefix in ["j", "ja", "jav", "java"]:
-            assert not main.suggest_cache.contains(prefix)
+            assert not main.suggest_cache.contains(f"trending:{prefix}")
 
     def test_cache_results_match_trie(self, search_client: TestClient) -> None:
         """Cached results should be identical to fresh trie results."""
