@@ -1,0 +1,24 @@
+Consistent Hashing Demo
+==================================================
+
+Sample size: 1000 keys
+Initial nodes: ['node-0', 'node-1', 'node-2', 'node-3']
+Added node: node-4
+
+Distribution BEFORE adding node-4:
+  node-0: 256 keys (25.6%)
+  node-1: 262 keys (26.2%)
+  node-2: 237 keys (23.7%)
+  node-3: 245 keys (24.5%)
+
+Distribution AFTER adding node-4:
+  node-0: 212 keys (21.2%)
+  node-1: 202 keys (20.2%)
+  node-2: 183 keys (18.3%)
+  node-3: 214 keys (21.4%)
+  node-4: 189 keys (18.9%)
+
+Keys that changed owner: 189/1000 (18.9%)
+Expected (ideal): ~200/1000 (~20.0%)
+
+PASS: Only a fraction of keys were remapped -- consistent hashing works!

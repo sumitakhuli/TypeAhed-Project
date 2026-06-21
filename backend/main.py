@@ -2,9 +2,10 @@
 Type-Ahead Search — FastAPI backend.
 
 On startup the server loads ``/data/queries.csv`` into a Trie.
-The ``GET /suggest`` endpoint returns the top-10 matches for a prefix.
+The ``GET /suggest`` endpoint returns the top-10 matches for a prefix,
+backed by a consistent-hash-ring cache with 60-second TTL.
 The ``POST /search`` endpoint records a search by incrementing the trie
-count and persisting the change back to ``queries.csv``.
+count, invalidating affected cache prefixes, and persisting to CSV.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from cache import SuggestCache
 from trie import Trie
 
 # ---------------------------------------------------------------------------
@@ -42,11 +44,18 @@ class SearchResponse(BaseModel):
     message: str
 
 
+class CacheDebugResponse(BaseModel):
+    prefix: str
+    owner_node: str
+    status: str  # "hit" | "miss"
+
+
 # ---------------------------------------------------------------------------
-# Application lifespan — build the Trie once at startup
+# Application state — Trie + Cache
 # ---------------------------------------------------------------------------
 
 trie = Trie()
+suggest_cache = SuggestCache()
 
 
 def _data_csv_path() -> Path:
@@ -106,7 +115,6 @@ def persist_csv(csv_path: Path | None = None) -> None:
             writer.writerow([query, count])
 
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load data on startup; nothing special on shutdown."""
@@ -136,15 +144,22 @@ app.add_middleware(
 async def suggest(q: str = Query(default="")) -> SuggestResponse:
     """Return up to 10 autocomplete suggestions for the given prefix *q*.
 
-    - Empty or whitespace-only input → empty list (HTTP 200).
-    - Unknown prefix → empty list (HTTP 200).
-    - Results sorted by ``count`` descending.
+    Uses cache-aside: check the consistent-hash-ring cache first, compute
+    from the trie on a miss, and store the result with a 60-second TTL.
     """
     prefix = q.strip().lower()
     if not prefix:
         return SuggestResponse(suggestions=[])
 
+    # --- Cache lookup ---
+    cached = suggest_cache.get(prefix)
+    if cached is not None:
+        return SuggestResponse(suggestions=[Suggestion(**r) for r in cached])
+
+    # --- Cache miss: compute from trie ---
     results = trie.search(prefix, top_k=10)
+    suggest_cache.put(prefix, results)
+
     return SuggestResponse(
         suggestions=[Suggestion(**r) for r in results],
     )
@@ -154,10 +169,8 @@ async def suggest(q: str = Query(default="")) -> SuggestResponse:
 async def search(body: SearchRequest) -> SearchResponse:
     """Record a search: increment the query's count by 1 and persist.
 
-    - Normalizes the query the same way as ``/suggest``.
-    - If the query exists in the trie its count is incremented.
-    - If it doesn't exist it is inserted with count = 1.
-    - The updated trie is written back to ``queries.csv``.
+    After updating the trie, invalidates all prefixes of the query in the
+    cache so subsequent /suggest calls reflect the new count.
     """
     normalized = body.query.strip().lower()
     if not normalized:
@@ -166,4 +179,32 @@ async def search(body: SearchRequest) -> SearchResponse:
     trie.upsert(normalized, delta=1)
     persist_csv()
 
+    # Invalidate every prefix of this query from the cache
+    suggest_cache.invalidate_all_prefixes(normalized)
+
     return SearchResponse(message="Searched")
+
+
+@app.get("/cache/debug", response_model=CacheDebugResponse)
+async def cache_debug(prefix: str = Query(default="")) -> CacheDebugResponse:
+    """Return cache state for a given prefix without computing a new value.
+
+    Useful for debugging: shows which node owns the key and whether
+    it's currently cached (hit) or not (miss).
+    """
+    normalized = prefix.strip().lower()
+    if not normalized:
+        return CacheDebugResponse(
+            prefix="",
+            owner_node="",
+            status="miss",
+        )
+
+    owner = suggest_cache.owner_of(normalized)
+    is_cached = suggest_cache.contains(normalized)
+
+    return CacheDebugResponse(
+        prefix=normalized,
+        owner_node=owner,
+        status="hit" if is_cached else "miss",
+    )

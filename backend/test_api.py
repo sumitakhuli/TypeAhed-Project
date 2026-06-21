@@ -157,6 +157,7 @@ def search_client(tmp_path) -> TestClient:
     """Create an isolated TestClient for /search tests so trie mutations
     don't leak into the /suggest test class."""
     import main
+    from cache import SuggestCache
 
     csv_file = tmp_path / "queries.csv"
     with open(csv_file, "w", newline="", encoding="utf-8") as fh:
@@ -167,6 +168,7 @@ def search_client(tmp_path) -> TestClient:
 
     main.trie = Trie()
     main.load_trie(csv_file)
+    main.suggest_cache = SuggestCache()
 
     # Monkey-patch _data_csv_path so persist_csv writes to our temp file
     original = main._data_csv_path
@@ -236,3 +238,118 @@ class TestSearchEndpoint:
         assert mars["query"] == "mars"
         # Original was 1500, +2 = 1502
         assert mars["count"] == 1502
+
+
+# ---------------------------------------------------------------------------
+# Cache layer tests
+# ---------------------------------------------------------------------------
+
+
+class TestCacheLayer:
+    """Tests for the suggest cache (cache-aside + invalidation)."""
+
+    def test_second_suggest_is_cache_hit(self, search_client: TestClient) -> None:
+        """First call is a miss, second identical call should be a cache hit."""
+        import main
+
+        initial_hits = main.suggest_cache.hits
+        initial_misses = main.suggest_cache.misses
+
+        # First call — cache miss
+        search_client.get("/suggest", params={"q": "python"})
+        assert main.suggest_cache.misses == initial_misses + 1
+
+        # Second call — cache hit
+        search_client.get("/suggest", params={"q": "python"})
+        assert main.suggest_cache.hits == initial_hits + 1
+
+    def test_search_invalidates_cache(self, search_client: TestClient) -> None:
+        """POST /search should invalidate cached prefixes so the next
+        /suggest call returns the updated count."""
+        import main
+
+        # Warm the cache
+        resp = search_client.get("/suggest", params={"q": "mars"})
+        original = resp.json()["suggestions"][0]["count"]
+
+        # The prefix should now be cached
+        assert main.suggest_cache.contains("mars")
+
+        # Search (should invalidate)
+        search_client.post("/search", json={"query": "mars"})
+
+        # Cache should be invalidated
+        assert not main.suggest_cache.contains("mars")
+
+        # Next suggest call should return updated count
+        resp = search_client.get("/suggest", params={"q": "mars"})
+        assert resp.json()["suggestions"][0]["count"] == original + 1
+
+    def test_invalidation_covers_all_prefixes(self, search_client: TestClient) -> None:
+        """Invalidation should clear 'j', 'ja', 'jav', 'java' when searching 'java'."""
+        import main
+
+        # Warm cache for multiple prefixes
+        for prefix in ["j", "ja", "jav", "java"]:
+            search_client.get("/suggest", params={"q": prefix})
+            assert main.suggest_cache.contains(prefix)
+
+        # Search for "java" should invalidate all its prefixes
+        search_client.post("/search", json={"query": "java"})
+
+        for prefix in ["j", "ja", "jav", "java"]:
+            assert not main.suggest_cache.contains(prefix)
+
+    def test_cache_results_match_trie(self, search_client: TestClient) -> None:
+        """Cached results should be identical to fresh trie results."""
+        # First call (miss — from trie)
+        resp1 = search_client.get("/suggest", params={"q": "united"})
+        # Second call (hit — from cache)
+        resp2 = search_client.get("/suggest", params={"q": "united"})
+        assert resp1.json() == resp2.json()
+
+    def test_empty_query_not_cached(self, search_client: TestClient) -> None:
+        """Empty queries should not be stored in the cache."""
+        import main
+
+        initial_misses = main.suggest_cache.misses
+        search_client.get("/suggest", params={"q": ""})
+        # Should not have incremented miss (never went to cache)
+        assert main.suggest_cache.misses == initial_misses
+
+
+# ---------------------------------------------------------------------------
+# GET /cache/debug tests
+# ---------------------------------------------------------------------------
+
+
+class TestCacheDebugEndpoint:
+    """Tests for GET /cache/debug?prefix=<prefix>."""
+
+    def test_debug_miss_before_suggest(self, search_client: TestClient) -> None:
+        """Before any /suggest call, the cache should show a miss."""
+        resp = search_client.get("/cache/debug", params={"prefix": "python"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["prefix"] == "python"
+        assert data["status"] == "miss"
+        assert data["owner_node"].startswith("node-")
+
+    def test_debug_hit_after_suggest(self, search_client: TestClient) -> None:
+        """After a /suggest call, the debug endpoint should show a hit."""
+        search_client.get("/suggest", params={"q": "java"})
+
+        resp = search_client.get("/cache/debug", params={"prefix": "java"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["prefix"] == "java"
+        assert data["status"] == "hit"
+        assert data["owner_node"].startswith("node-")
+
+    def test_debug_empty_prefix(self, search_client: TestClient) -> None:
+        """Empty prefix should return miss with empty fields."""
+        resp = search_client.get("/cache/debug", params={"prefix": ""})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["prefix"] == ""
+        assert data["status"] == "miss"
