@@ -10,6 +10,7 @@ count, invalidating affected cache prefixes, and persisting to CSV.
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import os
 import time
@@ -58,6 +59,52 @@ class CacheDebugResponse(BaseModel):
 
 trie = Trie()
 suggest_cache = SuggestCache()
+
+# --- Batching State ---
+FLUSH_INTERVAL_SECONDS = 5
+MAX_BUFFER_SIZE = 50
+
+search_buffer: list[tuple[str, float]] = []
+total_search_events: int = 0
+total_store_writes: int = 0
+
+def flush_buffer() -> None:
+    """Flush buffered search events into the trie and cache synchronously."""
+    global total_store_writes
+
+    if not search_buffer:
+        return
+
+    # Take the current items and clear the buffer
+    batch = search_buffer[:]
+    search_buffer.clear()
+
+    # Group by query
+    grouped: dict[str, dict[str, float]] = {}
+    for query, ts in batch:
+        if query not in grouped:
+            grouped[query] = {"count": 0, "last_searched_at": ts}
+        grouped[query]["count"] += 1
+        grouped[query]["last_searched_at"] = max(grouped[query]["last_searched_at"], ts)
+
+    writes = len(grouped)
+    total_store_writes += writes
+
+    for query, data in grouped.items():
+        trie.upsert(query, delta=data["count"], last_searched_at=data["last_searched_at"])
+        suggest_cache.invalidate_all_prefixes(query)
+
+    persist_csv()
+    suggest_cache.delete("global_trending:10")
+
+    print(f"{len(batch)} search events -> {writes} store writes")
+
+async def periodic_flush() -> None:
+    """Background task to flush the buffer periodically."""
+    while True:
+        await asyncio.sleep(FLUSH_INTERVAL_SECONDS)
+        if search_buffer:
+            flush_buffer()
 
 
 def _data_csv_path() -> Path:
@@ -121,9 +168,14 @@ def persist_csv(csv_path: Path | None = None) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load data on startup; nothing special on shutdown."""
+    """Load data on startup; start background flush task."""
     load_trie()
+    flush_task = asyncio.create_task(periodic_flush())
     yield
+    flush_task.cancel()
+    # Flush any remaining items on graceful shutdown
+    if search_buffer:
+        flush_buffer()
 
 
 # ---------------------------------------------------------------------------
@@ -196,24 +248,38 @@ async def trending(limit: int = Query(default=10)) -> SuggestResponse:
 
 @app.post("/search", response_model=SearchResponse)
 async def search(body: SearchRequest) -> SearchResponse:
-    """Record a search: increment the query's count by 1 and persist.
+    """Record a search: queues the query for batch processing.
 
-    After updating the trie, invalidates all prefixes of the query in the
-    cache so subsequent /suggest calls reflect the new count.
+    Returns immediately. A background task (or size threshold) will
+    flush the buffer, update the trie, and invalidate the cache.
     """
+    global total_search_events
+
     normalized = body.query.strip().lower()
     if not normalized:
         return SearchResponse(message="Searched")
 
-    trie.upsert(normalized, delta=1)
-    persist_csv()
+    search_buffer.append((normalized, time.time()))
+    total_search_events += 1
 
-    # Invalidate every prefix of this query from the cache (both modes)
-    suggest_cache.invalidate_all_prefixes(normalized)
-    # Also invalidate the global trending caches
-    suggest_cache.delete("global_trending:10")
+    if len(search_buffer) >= MAX_BUFFER_SIZE:
+        flush_buffer()
 
     return SearchResponse(message="Searched")
+
+class BatchStatsResponse(BaseModel):
+    total_search_events: int
+    total_store_writes: int
+    current_buffer_size: int
+
+@app.get("/admin/batch-stats", response_model=BatchStatsResponse)
+async def batch_stats() -> BatchStatsResponse:
+    """Return running totals of batch processing stats."""
+    return BatchStatsResponse(
+        total_search_events=total_search_events,
+        total_store_writes=total_store_writes,
+        current_buffer_size=len(search_buffer),
+    )
 
 
 @app.get("/cache/debug", response_model=CacheDebugResponse)

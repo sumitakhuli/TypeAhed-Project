@@ -187,8 +187,10 @@ class TestSearchEndpoint:
         resp = search_client.get("/suggest", params={"q": "python programming"})
         original_count = resp.json()["suggestions"][0]["count"]
 
+        import main
         # Submit search
         resp = search_client.post("/search", json={"query": "python programming"})
+        main.flush_buffer()
         assert resp.status_code == 200
         assert resp.json()["message"] == "Searched"
 
@@ -199,7 +201,9 @@ class TestSearchEndpoint:
 
     def test_search_inserts_new_query(self, search_client: TestClient) -> None:
         """Searching a brand-new query should insert it with count = 1."""
+        import main
         resp = search_client.post("/search", json={"query": "quantum computing"})
+        main.flush_buffer()
         assert resp.status_code == 200
         assert resp.json()["message"] == "Searched"
 
@@ -218,7 +222,9 @@ class TestSearchEndpoint:
 
     def test_search_normalizes_case(self, search_client: TestClient) -> None:
         """Search should normalize to lowercase, matching the trie."""
+        import main
         resp = search_client.post("/search", json={"query": "PYTHON Programming"})
+        main.flush_buffer()
         assert resp.status_code == 200
 
         resp = search_client.get("/suggest", params={"q": "python programming"})
@@ -229,9 +235,11 @@ class TestSearchEndpoint:
 
     def test_search_updates_visible_in_suggest(self, search_client: TestClient) -> None:
         """After searching, the next /suggest call should reflect the new count."""
+        import main
         # Search for "mars" twice
         search_client.post("/search", json={"query": "mars"})
         search_client.post("/search", json={"query": "mars"})
+        main.flush_buffer()
 
         resp = search_client.get("/suggest", params={"q": "mars"})
         mars = resp.json()["suggestions"][0]
@@ -277,6 +285,7 @@ class TestCacheLayer:
 
         # Search (should invalidate)
         search_client.post("/search", json={"query": "mars"})
+        main.flush_buffer()
 
         # Cache should be invalidated
         assert not main.suggest_cache.contains("trending:mars")
@@ -296,6 +305,7 @@ class TestCacheLayer:
 
         # Search for "java" should invalidate all its prefixes
         search_client.post("/search", json={"query": "java"})
+        main.flush_buffer()
 
         for prefix in ["j", "ja", "jav", "java"]:
             assert not main.suggest_cache.contains(f"trending:{prefix}")
@@ -353,3 +363,42 @@ class TestCacheDebugEndpoint:
         data = resp.json()
         assert data["prefix"] == ""
         assert data["status"] == "miss"
+
+
+# ---------------------------------------------------------------------------
+# GET /admin/batch-stats tests
+# ---------------------------------------------------------------------------
+
+
+class TestAdminBatchStatsEndpoint:
+    """Tests for GET /admin/batch-stats."""
+
+    def test_batch_stats_after_search(self, search_client: TestClient) -> None:
+        """The batch stats endpoint should return updated counts after searches and flushes."""
+        import main
+        
+        # Initial stats
+        resp1 = search_client.get("/admin/batch-stats")
+        assert resp1.status_code == 200
+        initial_events = resp1.json()["total_search_events"]
+        initial_writes = resp1.json()["total_store_writes"]
+        
+        # Submit 3 searches for the same query
+        search_client.post("/search", json={"query": "test query"})
+        search_client.post("/search", json={"query": "test query"})
+        search_client.post("/search", json={"query": "test query"})
+        
+        # Buffer should have 3 events
+        resp2 = search_client.get("/admin/batch-stats")
+        assert resp2.json()["current_buffer_size"] == 3
+        assert resp2.json()["total_search_events"] == initial_events + 3
+        
+        # Flush the buffer (should collapse 3 events into 1 store write)
+        main.flush_buffer()
+        
+        # Check stats again
+        resp3 = search_client.get("/admin/batch-stats")
+        data3 = resp3.json()
+        assert data3["current_buffer_size"] == 0
+        assert data3["total_search_events"] == initial_events + 3
+        assert data3["total_store_writes"] == initial_writes + 1

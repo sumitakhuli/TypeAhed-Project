@@ -45,7 +45,7 @@ class Trie:
         node.count = count
         node.last_searched_at = last_searched_at
 
-    def upsert(self, query: str, delta: int = 1) -> int:
+    def upsert(self, query: str, delta: int = 1, last_searched_at: float | None = None) -> int:
         """Increment the count for *query* by *delta*, inserting if new.
 
         Returns the updated count.
@@ -58,7 +58,7 @@ class Trie:
         node.is_end = True
         node.query = query
         node.count += delta
-        node.last_searched_at = time.time()
+        node.last_searched_at = last_searched_at if last_searched_at is not None else time.time()
         return node.count
 
     def _find_node(self, prefix: str) -> TrieNode | None:

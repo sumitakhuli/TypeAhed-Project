@@ -60,6 +60,12 @@ GET http://localhost:8000/suggest?q=pyth
 }
 ```
 
+## Background Search Batching
+
+To improve throughput under high load, `POST /search` events are queued in an in-memory buffer rather than immediately written to the backing store. A background task periodically groups these buffered events by query, calculates aggregated increments, and flushes them to the Trie and persistent CSV store every 5 seconds or whenever the buffer reaches 50 items. 
+
+**Trade-off Notice**: Because events are buffered in memory, there is a risk of data loss. If the backend process crashes or is forcefully terminated, any unflushed search events (up to 5 seconds or 50 queries worth) will be lost permanently. This prioritizes performance and scaling at the cost of strict durability guarantees.
+
 ## Running Tests
 
 ```bash
